@@ -1,0 +1,159 @@
+Metadata-Version: 2.4
+Name: flux-check
+Version: 0.1.0
+Summary: FLUX constraint engine CLI — zero false negatives, vectorized batch, fracture-coalesce
+License: MIT
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.21
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+
+# flux-check
+
+A Python CLI for the FLUX constraint engine. Zero false negatives, numpy-vectorized batch, fracture-coalesce for independent constraint blocks.
+
+**Install:**
+```bash
+pip install -e .
+```
+
+## What It Does
+
+FLUX checks whether values fall within defined bounds. Every check is exact — no probabilistic shortcuts, no missed violations. NaN always violates.
+
+Three modules:
+- **core** — Exact constraint checking with zero-alloc hot path and numpy vectorized batch
+- **fracture** — Split constraint systems into independent blocks for parallel checking
+- **sediment** — Accumulate edge-case corrections as immutable layers
+
+Six industry presets: automotive, aviation, medical, energy, IoT, financial.
+
+## Quick Start
+
+```bash
+# See available presets
+flux-check presets
+
+# Check values against automotive preset (8 values for 8 constraints)
+flux-check check --preset automotive --values 3000,50,90,50,100,0,12,75
+
+# Force a failure
+flux-check check --preset automotive --values 9000,50,90,50,100,0,12,75
+
+# Batch check from CSV
+flux-check batch --preset automotive --input examples/automotive_data.csv --output results.csv
+
+# Fracture a constraint graph into independent blocks
+flux-check fracture --graph examples/graph_example.json
+
+# Benchmark
+flux-check bench --preset automotive --iterations 1000000
+```
+
+## As a Library
+
+```python
+from flux_check import FluxExact
+from flux_check.presets import get_preset
+
+fc = FluxExact(get_preset("automotive"))
+
+# Zero-alloc hot path
+mask = fc.check_mask(160)  # → 1 (bit 0 set: coolant_temp violated)
+
+# Full detail
+result = fc.check(160)
+print(result.passed)          # False
+print(result.severity.name)   # "CAUTION"
+print(result.details[0])      # ExactDetail with name, lo, hi, value, passed
+
+# Batch: numpy vectorized
+import numpy as np
+masks = fc.check_batch_numpy(np.array([50.0, 200.0, float("nan")]))
+# → array([0, 1, 255], dtype=uint8)
+```
+
+## Fracture-Coalesce
+
+When constraints involve different dimensions, the system can be fractured into independent blocks and checked in parallel:
+
+```python
+from flux_check.fracture import Fracturer, DependencyGraph
+import numpy as np
+
+# Define which dimensions each constraint touches
+graph = DependencyGraph.from_masks([
+    np.array([0, 1]),  # c0: touches dims 0 and 1
+    np.array([0]),     # c1: touches dim 0 (linked to c0)
+    np.array([2]),     # c2: touches dim 2 (independent)
+    np.array([2]),     # c3: touches dim 2 (linked to c2)
+])
+
+result = Fracturer().fracture(graph)
+# → 2 blocks: {c0, c1} and {c2, c3}
+# Speedup potential: 2.0x (largest block has 2 constraints, total has 4)
+```
+
+## Sediment Layers
+
+Edge-case corrections accumulate as immutable geological layers:
+
+```python
+from flux_check.sediment import SedimentStack, ConstraintCorrection
+
+stack = SedimentStack()
+stack.add_layer(
+    input_context={"crisis": "cold start false alarm"},
+    corrections=[ConstraintCorrection(
+        constraint_name="coolant_temp_c",
+        override_pass=True,
+        reason="Engine cold start can briefly dip below -40°C",
+    )],
+)
+
+# Run a check through sediment
+result = stack.check_with_sediment(
+    base_error_mask=0b001,
+    base_severity=1,
+    constraint_names=["coolant_temp_c", "rpm", "speed"],
+    values={"coolant_temp_c": -50, "rpm": 3000, "speed": 50},
+)
+print(result.passed)  # True — sediment corrected the false alarm
+```
+
+## Presets
+
+| Preset | Constraints | Domain |
+|--------|-------------|--------|
+| automotive | 8 | CAN bus sensors |
+| aviation | 8 | ADS-B / flight data |
+| medical | 8 | Vital signs (FHIR) |
+| energy | 8 | SCADA grid data |
+| iot | 8 | MQTT environmental |
+| financial | 8 | FIX protocol |
+
+Each preset has 8 constraints with bounds derived from industry standards.
+
+## Architecture
+
+**Invariant:** A value outside bounds is ALWAYS detected. No exceptions. NaN always violates.
+
+- `check_mask()` — Zero-alloc hot path, returns uint8 bitmask
+- `check()` — Full result with severity, details, violated count
+- `check_batch_numpy()` — Numpy-vectorized, processes millions of values/sec
+- `check_detail()` — Dict output for JSON serialization
+
+Error mask is a uint8 bitmask: bit i set means constraint i violated.
+Severity scales with violated count: PASS → CAUTION → WARNING → CRITICAL.
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest tests/ -v
+```
+
+## License
+
+MIT

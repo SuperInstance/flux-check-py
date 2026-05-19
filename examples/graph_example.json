@@ -1,0 +1,9 @@
+{
+    "constraints": [
+        {"dims": [0, 1], "name": "engine_rpm_vs_speed"},
+        {"dims": [0], "name": "rpm_only"},
+        {"dims": [2, 3], "name": "temp_group"},
+        {"dims": [2], "name": "temp_only"},
+        {"dims": [4], "name": "isolated_sensor"}
+    ]
+}
