@@ -1,42 +1,48 @@
 # flux-check
 
-A Python CLI for the FLUX constraint engine. Zero false negatives, numpy-vectorized batch, fracture-coalesce for independent constraint blocks.
+A command-line tool for exact constraint checking. Feed it values and bounds, and it tells you — unambiguously — whether everything is within spec.
 
-**Install:**
 ```bash
 pip install -e .
 ```
 
-## What It Does
+## How It Works
 
-FLUX checks whether values fall within defined bounds. Every check is exact — no probabilistic shortcuts, no missed violations. NaN always violates.
+Every check boils down to one question: *is this value between its lower and upper bound?* The answer is always exact — no approximations, no probabilities. If a value is outside bounds, the check fails. NaN always fails.
 
-Three modules:
-- **core** — Exact constraint checking with zero-alloc hot path and numpy vectorized batch
-- **fracture** — Split constraint systems into independent blocks for parallel checking
-- **sediment** — Accumulate edge-case corrections as immutable layers
+Results come back as a **bitmask**: bit 0 corresponds to constraint 0, bit 1 to constraint 1, and so on. A mask of `0` means everything passed. A mask of `5` (binary `0b101`) means constraints 0 and 2 both violated. This representation is cheap to compute, cheap to store, and cheap to combine.
 
-Six industry presets: automotive, aviation, medical, energy, IoT, financial.
+Three subsystems layered on top of that core:
 
-## Quick Start
+1. **core** — The hot path. Zero allocations on the single-value check. Numpy-vectorized for batch.
+2. **fracture** — Splits a set of constraints into independent blocks (ones that share no dimensions). Each block can be checked in parallel, then results are merged with bitwise OR.
+3. **sediment** — Accumulates edge-case corrections as immutable layers. Think of it as geological strata: each layer corrects known false alarms without rewriting the ones below it.
+
+## What This Module Does
+
+It's a CLI and Python library for checking whether sensor values, financial data, or any numeric measurements fall within defined tolerance ranges. It ships with six industry presets (automotive, aviation, medical, energy, IoT, financial) so you can start checking immediately.
+
+## CLI Usage
 
 ```bash
 # See available presets
 flux-check presets
 
-# Check values against automotive preset (8 values for 8 constraints)
+# Check 8 values against automotive's 8 constraints
 flux-check check --preset automotive --values 3000,50,90,50,100,0,12,75
+# → PASS
 
-# Force a failure
+# Force a failure (9000 RPM exceeds the 8000 RPM limit)
 flux-check check --preset automotive --values 9000,50,90,50,100,0,12,75
+# → CRITICAL (1 constraint violated)
 
-# Batch check from CSV
+# Batch check from CSV (numpy-vectorized under the hood)
 flux-check batch --preset automotive --input examples/automotive_data.csv --output results.csv
 
 # Fracture a constraint graph into independent blocks
 flux-check fracture --graph examples/graph_example.json
 
-# Benchmark
+# Benchmark your system
 flux-check bench --preset automotive --iterations 1000000
 ```
 
@@ -48,30 +54,30 @@ from flux_check.presets import get_preset
 
 fc = FluxExact(get_preset("automotive"))
 
-# Zero-alloc hot path
-mask = fc.check_mask(160)  # → 1 (bit 0 set: coolant_temp violated)
+# Fast path: returns a uint8 bitmask (0 = all pass)
+mask = fc.check_mask(9000)  # → 1 (bit 0 set: first constraint violated)
 
 # Full detail
-result = fc.check(160)
+result = fc.check(9000)
 print(result.passed)          # False
-print(result.severity.name)   # "CAUTION"
+print(result.severity.name)   # "CRITICAL"
 print(result.details[0])      # ExactDetail with name, lo, hi, value, passed
 
 # Batch: numpy vectorized
 import numpy as np
-masks = fc.check_batch_numpy(np.array([50.0, 200.0, float("nan")]))
+masks = fc.check_batch_numpy(np.array([3000.0, 9000.0, float("nan")]))
 # → array([0, 1, 255], dtype=uint8)
+# NaN violates everything → all bits set
 ```
 
 ## Fracture-Coalesce
 
-When constraints involve different dimensions, the system can be fractured into independent blocks and checked in parallel:
+When constraints touch different dimensions (e.g., temperature and RPM don't depend on each other), you can split them into independent blocks:
 
 ```python
 from flux_check.fracture import Fracturer, DependencyGraph
 import numpy as np
 
-# Define which dimensions each constraint touches
 graph = DependencyGraph.from_masks([
     np.array([0, 1]),  # c0: touches dims 0 and 1
     np.array([0]),     # c1: touches dim 0 (linked to c0)
@@ -81,12 +87,18 @@ graph = DependencyGraph.from_masks([
 
 result = Fracturer().fracture(graph)
 # → 2 blocks: {c0, c1} and {c2, c3}
-# Speedup potential: 2.0x (largest block has 2 constraints, total has 4)
+```
+
+Merge results from parallel blocks with bitwise OR:
+
+```python
+from flux_check import coalesce
+total = coalesce([0b01, 0b10])  # → 0b11
 ```
 
 ## Sediment Layers
 
-Edge-case corrections accumulate as immutable geological layers:
+Edge-case corrections accumulate as immutable layers — new corrections overlay old ones without mutating them:
 
 ```python
 from flux_check.sediment import SedimentStack, ConstraintCorrection
@@ -101,7 +113,6 @@ stack.add_layer(
     )],
 )
 
-# Run a check through sediment
 result = stack.check_with_sediment(
     base_error_mask=0b001,
     base_severity=1,
@@ -124,17 +135,18 @@ print(result.passed)  # True — sediment corrected the false alarm
 
 Each preset has 8 constraints with bounds derived from industry standards.
 
-## Architecture
+## Performance
 
-**Invariant:** A value outside bounds is ALWAYS detected. No exceptions. NaN always violates.
+Benchmarks should be run on your own hardware with `flux-check bench`. The hot-path single check is zero-allocation. Batch mode uses numpy vectorization — throughput scales with your hardware's SIMD width.
 
-- `check_mask()` — Zero-alloc hot path, returns uint8 bitmask
-- `check()` — Full result with severity, details, violated count
-- `check_batch_numpy()` — Numpy-vectorized, processes millions of values/sec
-- `check_detail()` — Dict output for JSON serialization
+## Where to Go Next
 
-Error mask is a uint8 bitmask: bit i set means constraint i violated.
-Severity scales with violated count: PASS → CAUTION → WARNING → CRITICAL.
+| If you want... | Go to |
+|----------------|-------|
+| The unified library (all modules in one import) | [flux-lib](../flux-lib-py) |
+| Thermodynamic analysis of constraints | [flux-lib](../flux-lib-py) — `ThermoEngine` |
+| Hyperbolic geometry for model routing | [flux-hyperbolic](../flux-hyperbolic-py) |
+| Genetic expression engine | [flux-genome](../flux-genome-py) |
 
 ## Development
 
