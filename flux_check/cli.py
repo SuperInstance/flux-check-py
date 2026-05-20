@@ -26,6 +26,42 @@ from flux_check.presets import PRESETS, list_presets, get_preset, get_preset_des
 from flux_check.fracture import Fracturer, DependencyGraph
 
 
+def cmd_check_vector(args):
+    """Check a vector of values — value[i] maps to constraint[i]."""
+    try:
+        constraints = get_preset(args.preset)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    values = [float(v.strip()) for v in args.values.split(",")]
+    if len(values) != len(constraints):
+        print(f"Error: got {len(values)} values but preset '{args.preset}' has {len(constraints)} constraints",
+              file=sys.stderr)
+        return 1
+
+    from flux_check.core import check_vector
+    result = check_vector(values, constraints)
+
+    print(f"Preset: {args.preset} ({get_preset_description(args.preset)})")
+    print(f"{'Constraint':<25} {'Value':>10} {'Lo':>10} {'Hi':>10} {'Status':<10}")
+    print("-" * 70)
+
+    for d in result.details:
+        status = "PASS" if d.passed else f"FAIL({('lo' if d.lo_violated else 'hi')})"
+        print(f"{d.name:<25} {d.value:>10.4g} {d.lo:>10.4g} {d.hi:>10.4g} {status:<10}")
+
+    print()
+    if result.passed:
+        print(f"Result: PASS — mask=0, all {len(values)} constraints satisfied")
+        return 0
+    else:
+        print(f"Result: FAIL — mask={result.error_mask} (0b{result.error_mask:08b}), "
+              f"{result.violated_count} constraint(s) violated")
+        print(f"Severity: {result.severity.name}")
+        return 1
+
+
 def cmd_check(args):
     """Check values against a preset."""
     try:
@@ -265,6 +301,11 @@ def main():
     )
     sub = parser.add_subparsers(dest="command", help="Available commands")
 
+    # check-vector
+    p_cv = sub.add_parser("check-vector", help="Check sensor vector — value[i] vs constraint[i]")
+    p_cv.add_argument("--preset", required=True, help="Preset name")
+    p_cv.add_argument("--values", required=True, help="Comma-separated values (one per constraint)")
+
     # check
     p_check = sub.add_parser("check", help="Check values against a preset")
     p_check.add_argument("--preset", required=True, help="Preset name")
@@ -297,6 +338,7 @@ def main():
 
     commands = {
         "check": cmd_check,
+        "check-vector": cmd_check_vector,
         "batch": cmd_batch,
         "fracture": cmd_fracture,
         "bench": cmd_bench,

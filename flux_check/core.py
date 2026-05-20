@@ -277,6 +277,84 @@ def check_exact(values: List[float], bounds: List[Dict]) -> int:
     return combined
 
 
+def check_vector(values: List[float], bounds: List[Dict]) -> ExactResult:
+    """
+    Check a vector of values — value[i] maps to constraint[i].
+
+    This is the sensor-array pattern: each sensor reading checks against
+    its own constraint (RPM against RPM bounds, temp against temp bounds, etc.).
+
+    Args:
+        values: list of values, one per constraint
+        bounds: list of {"lo": ..., "hi": ..., "name": ...} dicts
+
+    Returns:
+        ExactResult with combined error_mask and per-constraint details
+    """
+    if len(values) != len(bounds):
+        raise ValueError(f"Values length ({len(values)}) != bounds length ({len(bounds)})")
+    fc = FluxExact(bounds)
+    mask = 0
+    lo_mask = 0
+    hi_mask = 0
+    details = []
+    for i in range(fc.n):
+        v = float(values[i])
+        is_nan = v != v
+        if is_nan:
+            lo_f = hi_f = True
+        else:
+            lo_f = v < fc._lo[i]
+            hi_f = v > fc._hi[i]
+        p = not lo_f and not hi_f
+        if not p:
+            mask |= (1 << i)
+        if lo_f:
+            lo_mask |= (1 << i)
+        if hi_f:
+            hi_mask |= (1 << i)
+        details.append(ExactDetail(
+            name=fc._names[i], lo=fc._lo[i], hi=fc._hi[i], value=v,
+            passed=p, lo_violated=lo_f, hi_violated=hi_f,
+        ))
+    vc = bin(mask).count("1")
+    return ExactResult(
+        error_mask=mask,
+        severity=_SEVERITY_TABLE[vc] if vc < len(_SEVERITY_TABLE) else Severity.CRITICAL,
+        violated_lo=lo_mask,
+        violated_hi=hi_mask,
+        violated_count=vc,
+        details=details,
+    )
+
+
+def check_vector_batch(vectors: np.ndarray, bounds: List[Dict]) -> np.ndarray:
+    """
+    Batch vector check: each row is a vector where value[i] -> constraint[i].
+
+    Args:
+        vectors: 2D array-like, shape (n_samples, n_constraints)
+        bounds: list of {"lo": ..., "hi": ..., "name": ...} dicts
+
+    Returns:
+        np.ndarray of uint8 error_masks, shape (n_samples,)
+    """
+    mat = np.asarray(vectors, dtype=np.float64)
+    if mat.ndim == 1:
+        mat = mat.reshape(1, -1)
+    if mat.shape[1] != len(bounds):
+        raise ValueError(f"Vector width ({mat.shape[1]}) != bounds length ({len(bounds)})")
+    fc = FluxExact(bounds)
+    masks = np.zeros(mat.shape[0], dtype=np.uint8)
+    nan_rows = np.any(np.isnan(mat), axis=1)
+    all_bits = np.uint8((1 << fc.n) - 1)
+    masks[nan_rows] = all_bits
+    for i in range(fc.n):
+        violated = ~nan_rows & ((mat[:, i] < fc._lo[i]) | (mat[:, i] > fc._hi[i]))
+        masks[violated] |= np.uint8(1 << i)
+    return masks
+
+
 def check_batch(values_array, bounds: List[Dict]) -> np.ndarray:
     """
     Batch check: array of values against constraints.

@@ -28,13 +28,17 @@ It's a CLI and Python library for checking whether sensor values, financial data
 # See available presets
 flux-check presets
 
-# Check 8 values against automotive's 8 constraints
-flux-check check --preset automotive --values 3000,50,90,50,100,0,12,75
-# → PASS
+# Check a sensor vector — value[i] maps to constraint[i]
+flux-check check-vector --preset automotive --values 3000,50,12.1,45,12.5,65,1.0,120
+# → PASS (each value checked against its own constraint)
 
 # Force a failure (9000 RPM exceeds the 8000 RPM limit)
-flux-check check --preset automotive --values 9000,50,90,50,100,0,12,75
-# → CRITICAL (1 constraint violated)
+flux-check check-vector --preset automotive --values 9000,50,12.1,45,12.5,65,1.0,120
+# → FAIL — mask=1 (bit 0: rpm violated)
+
+# Legacy: check 8 values against automotive's 8 constraints (same scalar broadcast)
+flux-check check --preset automotive --values 3000,50,90,50,100,0,12,75
+# → PASS
 
 # Batch check from CSV (numpy-vectorized under the hood)
 flux-check batch --preset automotive --input examples/automotive_data.csv --output results.csv
@@ -46,12 +50,57 @@ flux-check fracture --graph examples/graph_example.json
 flux-check bench --preset automotive --iterations 1000000
 ```
 
+### Sensor-Array Pattern (`check-vector`)
+
+The `check-vector` command is the primary interface for sensor data. Each value
+maps to its corresponding constraint — RPM checks against RPM bounds, temperature
+against temperature bounds, and so on. This is the natural model for CAN bus,
+SCADA, ADS-B, and any multi-sensor system.
+
+```bash
+# All sensors in spec
+$ flux-check check-vector --preset automotive --values 3000,50,12.1,45,12.5,65,1.0,120
+Constraint                     Value         Lo         Hi Status
+----------------------------------------------------------------------
+rpm                            3000          0       8000 PASS
+speed_kmh                       50          0        300 PASS
+coolant_temp_c                12.1        -40        130 PASS
+[...]
+Result: PASS — mask=0, all 8 constraints satisfied
+
+# RPM out of range
+$ flux-check check-vector --preset automotive --values 9000,50,12.1,45,12.5,65,1.0,120
+Result: FAIL — mask=1 (0b00000001), 1 constraint(s) violated
+Severity: CAUTION
+```
+
 ## As a Library
 
 ```python
 from flux_check import FluxExact
+from flux_check.core import check_vector, check_vector_batch
 from flux_check.presets import get_preset
+import numpy as np
 
+# Vector check: value[i] → constraint[i] (sensor-array pattern)
+result = check_vector(
+    [3000, 50, 12.1, 45, 12.5, 65, 1.0, 120],
+    get_preset("automotive"),
+)
+print(result.passed)          # True
+print(result.error_mask)      # 0
+
+# Batch vector check: each row is a sensor reading
+masks = check_vector_batch(
+    np.array([
+        [3000, 50, 12.1, 45, 12.5, 65, 1.0, 120],
+        [9000, 50, 12.1, 45, 12.5, 65, 1.0, 120],  # RPM violation
+    ]),
+    get_preset("automotive"),
+)
+# → array([0, 1], dtype=uint8)
+
+# Legacy scalar interface
 fc = FluxExact(get_preset("automotive"))
 
 # Fast path: returns a uint8 bitmask (0 = all pass)
