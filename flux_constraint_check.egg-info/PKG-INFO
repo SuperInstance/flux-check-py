@@ -1,5 +1,5 @@
 Metadata-Version: 2.4
-Name: flux-check
+Name: flux-constraint-check
 Version: 0.1.0
 Summary: FLUX constraint engine CLI — zero false negatives, vectorized batch, fracture-coalesce
 License: MIT
