@@ -1,2 +1,0 @@
-[console_scripts]
-flux-check = flux_check.cli:main
