@@ -1,208 +1,158 @@
-# flux-check
+# flux-check-py
 
-A command-line tool for exact constraint checking. Feed it values and bounds, and it tells you — unambiguously — whether everything is within spec.
+Python CLI and library for exact constraint checking — zero false negatives, vectorized batch operations, and constraint graph fracture-coalesce analysis.
+
+## What It Does
+
+`flux-check-py` is a constraint engine that checks whether values fall within defined bounds. It guarantees **zero false negatives**: any value outside bounds is always detected, including NaN. It ships with 6 industry presets (automotive, aviation, medical, energy, IoT, financial), supports NumPy-vectorized batch checking, and can fracture constraint graphs into independent blocks for parallel evaluation.
+
+## Installation
 
 ```bash
-pip install -e .
+pip install flux-constraint-check
 ```
 
-## How It Works
+Requires Python ≥ 3.9 and NumPy ≥ 1.21.
 
-Every check boils down to one question: *is this value between its lower and upper bound?* The answer is always exact — no approximations, no probabilities. If a value is outside bounds, the check fails. NaN always fails.
+## Quick Start
 
-Results come back as a **bitmask**: bit 0 corresponds to constraint 0, bit 1 to constraint 1, and so on. A mask of `0` means everything passed. A mask of `5` (binary `0b101`) means constraints 0 and 2 both violated. This representation is cheap to compute, cheap to store, and cheap to combine.
-
-Three subsystems layered on top of that core:
-
-1. **core** — The hot path. Zero allocations on the single-value check. Numpy-vectorized for batch.
-2. **fracture** — Splits a set of constraints into independent blocks (ones that share no dimensions). Each block can be checked in parallel, then results are merged with bitwise OR.
-3. **sediment** — Accumulates edge-case corrections as immutable layers. Think of it as geological strata: each layer corrects known false alarms without rewriting the ones below it.
-
-## What This Module Does
-
-It's a CLI and Python library for checking whether sensor values, financial data, or any numeric measurements fall within defined tolerance ranges. It ships with six industry presets (automotive, aviation, medical, energy, IoT, financial) so you can start checking immediately.
-
-## CLI Usage
+### CLI
 
 ```bash
-# See available presets
+# List available presets
 flux-check presets
 
-# Check a sensor vector — value[i] maps to constraint[i]
-flux-check check-vector --preset automotive --values 3000,50,12.1,45,12.5,65,1.0,120
-# → PASS (each value checked against its own constraint)
+# Check a sensor vector against the automotive preset
+flux-check check-vector --preset automotive --values 3000,120,90,50,100,0,12,75
 
-# Force a failure (9000 RPM exceeds the 8000 RPM limit)
-flux-check check-vector --preset automotive --values 9000,50,12.1,45,12.5,65,1.0,120
-# → FAIL — mask=1 (bit 0: rpm violated)
+# Batch check from CSV
+flux-check batch --preset automotive --input sensors.csv --output results.csv
 
-# Legacy: check 8 values against automotive's 8 constraints (same scalar broadcast)
-flux-check check --preset automotive --values 3000,50,90,50,100,0,12,75
-# → PASS
+# Fracture a constraint dependency graph
+flux-check fracture --graph graph.json
 
-# Batch check from CSV (numpy-vectorized under the hood)
-flux-check batch --preset automotive --input examples/automotive_data.csv --output results.csv
-
-# Fracture a constraint graph into independent blocks
-flux-check fracture --graph examples/graph_example.json
-
-# Benchmark your system
+# Benchmark
 flux-check bench --preset automotive --iterations 1000000
 ```
 
-### Sensor-Array Pattern (`check-vector`)
-
-The `check-vector` command is the primary interface for sensor data. Each value
-maps to its corresponding constraint — RPM checks against RPM bounds, temperature
-against temperature bounds, and so on. This is the natural model for CAN bus,
-SCADA, ADS-B, and any multi-sensor system.
-
-```bash
-# All sensors in spec
-$ flux-check check-vector --preset automotive --values 3000,50,12.1,45,12.5,65,1.0,120
-Constraint                     Value         Lo         Hi Status
-----------------------------------------------------------------------
-rpm                            3000          0       8000 PASS
-speed_kmh                       50          0        300 PASS
-coolant_temp_c                12.1        -40        130 PASS
-[...]
-Result: PASS — mask=0, all 8 constraints satisfied
-
-# RPM out of range
-$ flux-check check-vector --preset automotive --values 9000,50,12.1,45,12.5,65,1.0,120
-Result: FAIL — mask=1 (0b00000001), 1 constraint(s) violated
-Severity: CAUTION
-```
-
-## As a Library
+### Python Library
 
 ```python
-from flux_check import FluxExact
-from flux_check.core import check_vector, check_vector_batch
+from flux_check import FluxExact, check_batch
 from flux_check.presets import get_preset
 import numpy as np
 
-# Vector check: value[i] → constraint[i] (sensor-array pattern)
-result = check_vector(
-    [3000, 50, 12.1, 45, 12.5, 65, 1.0, 120],
-    get_preset("automotive"),
-)
-print(result.passed)          # True
-print(result.error_mask)      # 0
+# Load a preset
+constraints = get_preset("automotive")
+fc = FluxExact(constraints)
 
-# Batch vector check: each row is a sensor reading
-masks = check_vector_batch(
-    np.array([
-        [3000, 50, 12.1, 45, 12.5, 65, 1.0, 120],
-        [9000, 50, 12.1, 45, 12.5, 65, 1.0, 120],  # RPM violation
-    ]),
-    get_preset("automotive"),
-)
-# → array([0, 1], dtype=uint8)
+# Single value check (zero-alloc hot path)
+mask = fc.check_mask(160)  # Returns error bitmask (0 = all pass)
 
-# Legacy scalar interface
-fc = FluxExact(get_preset("automotive"))
+# Full detail result
+result = fc.check(160)
+for d in result.details:
+    print(f"{d.name}: {'PASS' if d.passed else 'FAIL'}")
 
-# Fast path: returns a uint8 bitmask (0 = all pass)
-mask = fc.check_mask(9000)  # → 1 (bit 0 set: first constraint violated)
+# Vectorized batch check
+values = np.array([50.0, 3000.0, 9000.0, float("nan")])
+masks = fc.check_batch_numpy(values)
 
-# Full detail
-result = fc.check(9000)
-print(result.passed)          # False
-print(result.severity.name)   # "CRITICAL"
-print(result.details[0])      # ExactDetail with name, lo, hi, value, passed
-
-# Batch: numpy vectorized
-import numpy as np
-masks = fc.check_batch_numpy(np.array([3000.0, 9000.0, float("nan")]))
-# → array([0, 1, 255], dtype=uint8)
-# NaN violates everything → all bits set
+# Check a sensor vector (value[i] vs constraint[i])
+from flux_check.core import check_vector
+result = check_vector([3000, 120, 90, 50, 100, 0, 12, 75], constraints)
 ```
 
-## Fracture-Coalesce
+## API
 
-When constraints touch different dimensions (e.g., temperature and RPM don't depend on each other), you can split them into independent blocks:
+### `FluxExact(constraints)`
+
+Core engine. Accepts a list of `{"lo": float, "hi": float, "name": str}` dicts (max 8).
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `check_mask(value)` | `int` | Zero-alloc error bitmask (0 = pass) |
+| `check(value)` | `ExactResult` | Full result with severity + per-constraint details |
+| `check_detail(value)` | `dict` | Allocating full-detail check |
+| `check_batch_numpy(array)` | `np.ndarray[uint8]` | Vectorized batch, one mask per value |
+| `benchmark(iterations)` | `float` | Checks/sec throughput |
+
+### `check_vector(values, constraints)` → `ExactResult`
+
+Check a sensor array where `value[i]` maps to `constraint[i]`. Returns combined mask with per-constraint detail.
+
+### `check_vector_batch(matrix, constraints)` → `np.ndarray[uint8]`
+
+Batch version of the vector check for 2D arrays (rows = samples, cols = constraints).
+
+### Fracture-Coalesce
 
 ```python
 from flux_check.fracture import Fracturer, DependencyGraph
-import numpy as np
 
+# Define which constraints share dimensions
 graph = DependencyGraph.from_masks([
-    np.array([0, 1]),  # c0: touches dims 0 and 1
-    np.array([0]),     # c1: touches dim 0 (linked to c0)
-    np.array([2]),     # c2: touches dim 2 (independent)
-    np.array([2]),     # c3: touches dim 2 (linked to c2)
-])
+    np.array([0, 1]),  # constraint 0 touches dims 0, 1
+    np.array([0]),     # constraint 1 touches dim 0
+    np.array([2]),     # constraint 2 touches dim 2
+], constraint_names=["c0", "c1", "c2"])
 
 result = Fracturer().fracture(graph)
-# → 2 blocks: {c0, c1} and {c2, c3}
+# result.blocks → independent blocks for parallel evaluation
+# result.speedup_potential → parallelism factor
 ```
 
-Merge results from parallel blocks with bitwise OR:
+### Sediment Layers
 
-```python
-from flux_check import coalesce
-total = coalesce([0b01, 0b10])  # → 0b11
-```
-
-## Sediment Layers
-
-Edge-case corrections accumulate as immutable layers — new corrections overlay old ones without mutating them:
+Accumulated edge-case corrections as immutable layers:
 
 ```python
 from flux_check.sediment import SedimentStack, ConstraintCorrection
 
 stack = SedimentStack()
 stack.add_layer(
-    input_context={"crisis": "cold start false alarm"},
+    input_context={"scenario": "cold start"},
     corrections=[ConstraintCorrection(
         constraint_name="coolant_temp_c",
         override_pass=True,
-        reason="Engine cold start can briefly dip below -40°C",
+        reason="Cold start allows brief sub-range readings",
     )],
 )
-
-result = stack.check_with_sediment(
-    base_error_mask=0b001,
-    base_severity=1,
-    constraint_names=["coolant_temp_c", "rpm", "speed"],
-    values={"coolant_temp_c": -50, "rpm": 3000, "speed": 50},
-)
-print(result.passed)  # True — sediment corrected the false alarm
 ```
 
-## Presets
+## Industry Presets
 
 | Preset | Constraints | Domain |
-|--------|-------------|--------|
-| automotive | 8 | CAN bus sensors |
-| aviation | 8 | ADS-B / flight data |
-| medical | 8 | Vital signs (FHIR) |
-| energy | 8 | SCADA grid data |
-| iot | 8 | MQTT environmental |
-| financial | 8 | FIX protocol |
+|--------|------------|--------|
+| `automotive` | 8 | CAN bus sensor ranges |
+| `aviation` | 8 | ADS-B / flight data |
+| `medical` | 8 | Vital signs (FHIR-compatible) |
+| `energy` | 8 | Grid SCADA ranges |
+| `iot` | 8 | MQTT environmental sensors |
+| `financial` | 8 | FIX protocol ranges |
 
-Each preset has 8 constraints with bounds derived from industry standards.
+## Severity Levels
 
-## Performance
+| Severity | Violated Constraints |
+|----------|---------------------|
+| PASS (0) | 0 |
+| CAUTION (1) | 1 |
+| WARNING (2) | 2–3 |
+| CRITICAL (3) | 4+ |
 
-Benchmarks should be run on your own hardware with `flux-check bench`. The hot-path single check is zero-allocation. Batch mode uses numpy vectorization — throughput scales with your hardware's SIMD width.
-
-## Where to Go Next
-
-| If you want... | Go to |
-|----------------|-------|
-| The unified library (all modules in one import) | [flux-lib](../flux-lib-py) |
-| Thermodynamic analysis of constraints | [flux-lib](../flux-lib-py) — `ThermoEngine` |
-| Hyperbolic geometry for model routing | [flux-hyperbolic](../flux-hyperbolic-py) |
-| Genetic expression engine | [flux-genome](../flux-genome-py) |
-
-## Development
+## Testing
 
 ```bash
-pip install -e ".[dev]"
-pytest tests/ -v
+pip install pytest && pytest tests/
 ```
+
+74 tests covering core checking, presets, NaN handling, batch operations, fracture-coalesce, sediment layers, and CLI commands.
+
+## Related Repos
+
+- **[flux-fracture-c](https://github.com/SuperInstance/flux-fracture-c)** — C99 single-header fracture-coalesce library
+- **[constraint-theory-rust-python](https://github.com/SuperInstance/constraint-theory-rust-python)** — Rust engine with PyO3 Python bindings
+- **[constraint-theory-engine-cpp-lua](https://github.com/SuperInstance/constraint-theory-engine-cpp-lua)** — C++ engine with LuaJIT orchestration, CDCL solver, AVX-512
 
 ## License
 
